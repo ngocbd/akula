@@ -9,10 +9,7 @@ use akula::{
         erigon::ErigonApiServerImpl, eth::EthApiServerImpl, net::NetApiServerImpl,
         otterscan::OtterscanApiServerImpl, trace::TraceApiServerImpl, web3::Web3ApiServerImpl,
     },
-    stagedsync::{
-        self,
-        stages::{BODIES, HEADERS},
-    },
+    stagedsync,
     stages::*,
     version_string,
 };
@@ -103,6 +100,10 @@ pub struct Opt {
     /// Enable JSONRPC at this IP address and port.
     #[clap(long, default_value = "127.0.0.1:8545")]
     pub rpc_listen_address: SocketAddr,
+
+    /// Enable Websocket at this IP address and port.
+    #[clap(long, default_value = "127.0.0.1:8546")]
+    pub websocket_listen_address: SocketAddr,
 
     /// Enable gRPC at this IP address and port.
     #[clap(long, default_value = "127.0.0.1:7545")]
@@ -376,6 +377,7 @@ fn main() -> anyhow::Result<()> {
                 );
                 staged_sync.push(
                     Execution {
+                        max_block: opt.max_block,
                         batch_size: opt.execution_batch_size.saturating_mul(1_000_000_000_u64),
                         history_batch_size: opt
                             .execution_history_batch_size
