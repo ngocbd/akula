@@ -1,6 +1,6 @@
 #![feature(never_type)]
 use akula::{
-    binutil::{AkulaDataDir, ExpandedPathBuf},
+    binutil::AkulaDataDir,
     consensus::{engine_factory, Consensus, ForkChoiceMode},
     hex_to_bytes,
     kv::{
@@ -15,6 +15,7 @@ use akula::{
 use anyhow::{ensure, format_err, Context};
 use bytes::Bytes;
 use clap::Parser;
+use expanded_pathbuf::ExpandedPathBuf;
 use std::{borrow::Cow, collections::BTreeMap, io::Read, sync::Arc};
 use tokio::pin;
 use tracing::*;
@@ -43,7 +44,7 @@ pub enum OptCommand {
     DbQuery {
         #[clap(long)]
         table: String,
-        #[clap(long, parse(try_from_str = hex_to_bytes))]
+        #[clap(long, value_parser(hex_to_bytes))]
         key: Bytes,
     },
 
@@ -51,7 +52,7 @@ pub enum OptCommand {
     DbWalk {
         #[clap(long)]
         table: String,
-        #[clap(long, parse(try_from_str = hex_to_bytes))]
+        #[clap(long, value_parser(hex_to_bytes))]
         starting_key: Option<Bytes>,
         #[clap(long)]
         max_entries: Option<usize>,
@@ -61,9 +62,9 @@ pub enum OptCommand {
     DbSet {
         #[clap(long)]
         table: String,
-        #[clap(long, parse(try_from_str = hex_to_bytes))]
+        #[clap(long, value_parser(hex_to_bytes))]
         key: Bytes,
-        #[clap(long, parse(try_from_str = hex_to_bytes))]
+        #[clap(long, value_parser(hex_to_bytes))]
         value: Bytes,
     },
 
@@ -71,7 +72,7 @@ pub enum OptCommand {
     DbUnset {
         #[clap(long)]
         table: String,
-        #[clap(long, parse(try_from_str = hex_to_bytes))]
+        #[clap(long, value_parser(hex_to_bytes))]
         key: Bytes,
     },
 
@@ -83,9 +84,9 @@ pub enum OptCommand {
 
     /// Check table equality in two databases
     CheckEqual {
-        #[clap(long, parse(from_os_str))]
+        #[clap(long)]
         db1: ExpandedPathBuf,
-        #[clap(long, parse(from_os_str))]
+        #[clap(long)]
         db2: ExpandedPathBuf,
         #[clap(long)]
         table: String,
@@ -345,7 +346,6 @@ fn select_db_decode(table: &str, key: &[u8], value: &[u8]) -> anyhow::Result<(St
             BlockTransactionLookup,
             Config,
             TxSender,
-            LastHeader,
             Issuance,
             Version,
         ],
@@ -529,15 +529,10 @@ fn read_block(data_dir: AkulaDataDir, block_num: BlockNumber) -> anyhow::Result<
 
     let tx = env.begin()?;
 
-    let canonical_hash = tx
-        .get(tables::CanonicalHeader, block_num)?
-        .ok_or_else(|| format_err!("no such canonical block"))?;
-    let header = tx
-        .get(tables::Header, (block_num, canonical_hash))?
+    let header = akula::accessors::chain::header::read(&tx, block_num)?
         .ok_or_else(|| format_err!("header not found"))?;
-    let body =
-        akula::accessors::chain::block_body::read_without_senders(&tx, canonical_hash, block_num)?
-            .ok_or_else(|| format_err!("block body not found"))?;
+    let body = akula::accessors::chain::block_body::read_without_senders(&tx, block_num)?
+        .ok_or_else(|| format_err!("block body not found"))?;
 
     let partial_header = PartialHeader::from(header.clone());
 
@@ -591,7 +586,7 @@ fn read_account_changes(data_dir: AkulaDataDir, block: BlockNumber) -> anyhow::R
 
     let tx = env.begin()?;
 
-    let walker = tx.cursor(tables::AccountChangeSet)?.walk_dup(block);
+    let walker = tx.cursor(tables::AccountChangeSet)?.walk_dup(block, None);
 
     pin!(walker);
 
@@ -633,7 +628,7 @@ fn read_storage(data_dir: AkulaDataDir, address: Address) -> anyhow::Result<()> 
     println!(
         "{:?}",
         tx.cursor(tables::Storage)?
-            .walk_dup(address)
+            .walk_dup(address, None)
             .collect::<anyhow::Result<Vec<_>>>()?
     );
 

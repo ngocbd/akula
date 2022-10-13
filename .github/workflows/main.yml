@@ -27,7 +27,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
-          args: --all -- --check
+          args: --all -- --check --config=imports_granularity=Crate
 
       - uses: actions-rs/install@v0.1
         with:
@@ -59,7 +59,7 @@ jobs:
           repository: ethereum/tests
           submodules: recursive
           path: ethereum-tests
-          ref: 'v10.4'
+          ref: 'v11.1'
 
       - run: |
           env RUST_LOG=error cargo run --release --bin consensus-tests -- --tests="./ethereum-tests"

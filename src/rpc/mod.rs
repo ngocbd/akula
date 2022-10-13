@@ -1,9 +1,12 @@
+pub mod debug;
 pub mod erigon;
 pub mod eth;
 pub mod net;
 pub mod otterscan;
+pub mod parity;
 pub mod trace;
 pub mod web3;
+
 pub mod helpers {
     use crate::{
         accessors::chain,
@@ -140,6 +143,29 @@ pub mod helpers {
         }
     }
 
+    pub fn grpc_block_id(block_id: ethereum_interfaces::web3::BlockId) -> Option<types::BlockId> {
+        block_id.id.and_then(|block_id| match block_id {
+            ethereum_interfaces::web3::block_id::Id::Hash(hash) => {
+                Some(types::BlockId::Hash(hash.into()))
+            }
+            ethereum_interfaces::web3::block_id::Id::Number(block_number) => {
+                block_number.block_number.map(|number| {
+                    types::BlockId::Number(match number {
+                        ethereum_interfaces::web3::block_number::BlockNumber::Latest(_) => {
+                            types::BlockNumber::Latest
+                        }
+                        ethereum_interfaces::web3::block_number::BlockNumber::Pending(_) => {
+                            types::BlockNumber::Pending
+                        }
+                        ethereum_interfaces::web3::block_number::BlockNumber::Number(number) => {
+                            types::BlockNumber::Number(number.into())
+                        }
+                    })
+                })
+            }
+        })
+    }
+
     pub fn resolve_block_number<K: TransactionKind, E: EnvironmentKind>(
         txn: &MdbxTransaction<'_, K, E>,
         block_number: ethereum_jsonrpc::types::BlockNumber,
@@ -181,23 +207,20 @@ pub mod helpers {
         if let Some((block_number, block_hash)) = resolve_block_id(txn, block_id)? {
             if let Some((block_number, block_hash, header)) = {
                 if let Some(n) = uncle_index {
-                    txn.get(tables::BlockBody, (block_number, block_hash))?
-                        .and_then(|body| {
-                            body.uncles
-                                .get(n.as_usize())
-                                .cloned()
-                                .map(|uncle| (uncle.number, uncle.hash(), uncle))
-                        })
+                    txn.get(tables::BlockBody, block_number)?.and_then(|body| {
+                        body.ommers
+                            .get(n.as_usize())
+                            .cloned()
+                            .map(|uncle| (uncle.number, uncle.hash(), uncle))
+                    })
                 } else {
-                    txn.get(tables::Header, (block_number, block_hash))?
+                    txn.get(tables::Header, block_number)?
                         .map(|header| (block_number, block_hash, header))
                 }
             } {
-                if let Some(body) =
-                    chain::block_body::read_without_senders(txn, block_hash, block_number)?
-                {
+                if let Some(body) = chain::block_body::read_without_senders(txn, block_number)? {
                     let transactions: Vec<types::Tx> = if include_txs {
-                        let senders = chain::tx_sender::read(txn, block_hash, block_number)?;
+                        let senders = chain::tx_sender::read(txn, block_number)?;
                         body.transactions
                             .into_iter()
                             .zip(senders)
@@ -219,7 +242,7 @@ pub mod helpers {
                             .collect()
                     };
 
-                    let td = chain::td::read(txn, block_hash, block_number)?;
+                    let td = chain::td::read(txn, block_number)?;
 
                     return Ok(Some(types::Block {
                         number: Some(U64::from(block_number.0)),
@@ -258,10 +281,10 @@ pub mod helpers {
     ) -> Result<Vec<types::TransactionReceipt>, DuoError> {
         let block_hash = chain::canonical_hash::read(txn, block_number)?
             .ok_or_else(|| format_err!("no canonical header for block #{block_number:?}"))?;
-        let header = chain::header::read(txn, block_hash, block_number)?.ok_or_else(|| {
+        let header = chain::header::read(txn, block_number)?.ok_or_else(|| {
             format_err!("header not found for block #{block_number}/{block_hash}")
         })?;
-        let block_body = chain::block_body::read_with_senders(txn, block_hash, block_number)?
+        let block_body = chain::block_body::read_with_senders(txn, block_number)?
             .ok_or_else(|| format_err!("body not found for block #{block_number}/{block_hash}"))?;
         let chain_spec = chain::chain_config::read(txn)?
             .ok_or_else(|| format_err!("chain specification not found"))?;

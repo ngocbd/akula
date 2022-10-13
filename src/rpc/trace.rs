@@ -10,6 +10,7 @@ use crate::{
     u256_to_h256, Buffer, HeaderReader, IntraBlockState, StateReader, StateWriter,
 };
 use anyhow::format_err;
+use arrayvec::ArrayVec;
 use async_trait::async_trait;
 use bytes::Bytes;
 use ethereum_interfaces::web3::{
@@ -201,7 +202,7 @@ fn do_call_many<K, E>(
     txn: &MdbxTransaction<'_, K, E>,
     kind: CallManyMode,
     calls: Vec<(Address, Message, HashSet<types::TraceType>)>,
-    finalization: Option<Vec<BlockHeader>>,
+    ommers_for_finalization: Option<ArrayVec<BlockHeader, 2>>,
 ) -> anyhow::Result<(Vec<types::FullTrace>, Vec<types::RewardAction>)>
 where
     K: TransactionKind,
@@ -215,7 +216,7 @@ where
 
     let (historical_block, block_number, header) = match kind {
         CallManyMode::Replay(b) => {
-            let (block_number, block_hash) =
+            let (block_number, _) =
                 helpers::resolve_block_id(txn, b)?.ok_or_else(|| format_err!("block not found"))?;
             (
                 Some(
@@ -225,30 +226,25 @@ where
                         .into(),
                 ),
                 block_number,
-                crate::accessors::chain::header::read(txn, block_hash, block_number)?
+                crate::accessors::chain::header::read(txn, block_number)?
                     .ok_or_else(|| format_err!("header not found"))?,
             )
         }
         CallManyMode::Speculative(b) => match b {
             types::BlockId::Number(types::BlockNumber::Latest)
             | types::BlockId::Number(types::BlockNumber::Pending) => {
-                let (latest_block_number, latest_block_hash) =
-                    helpers::resolve_block_id(txn, b)?
-                        .ok_or_else(|| format_err!("block not found"))?;
+                let (latest_block_number, _) = helpers::resolve_block_id(txn, b)?
+                    .ok_or_else(|| format_err!("block not found"))?;
 
-                let header = crate::accessors::chain::header::read(
-                    txn,
-                    latest_block_hash,
-                    latest_block_number,
-                )?
-                .ok_or_else(|| format_err!("header not found"))?;
+                let header = crate::accessors::chain::header::read(txn, latest_block_number)?
+                    .ok_or_else(|| format_err!("header not found"))?;
                 (None, latest_block_number, header)
             }
             other => {
-                let (block_number, block_hash) = helpers::resolve_block_id(txn, other)?
+                let (block_number, _) = helpers::resolve_block_id(txn, other)?
                     .ok_or_else(|| format_err!("block not found"))?;
 
-                let header = crate::accessors::chain::header::read(txn, block_hash, block_number)?
+                let header = crate::accessors::chain::header::read(txn, block_number)?
                     .ok_or_else(|| format_err!("header not found"))?;
 
                 (Some(block_number), block_number, header)
@@ -392,7 +388,7 @@ where
     }
 
     let mut rewards = vec![];
-    if let Some(ommers) = finalization {
+    if let Some(ommers) = ommers_for_finalization {
         for change in engine_factory(None, chain_spec, None)?.finalize(&header, &ommers)? {
             match change {
                 crate::consensus::FinalizationChange::Reward {
@@ -437,13 +433,11 @@ where
             let BlockBody {
                 transactions,
                 ommers,
-            } = crate::accessors::chain::block_body::read_without_senders(
-                txn,
-                block_hash,
-                block_number,
-            )?
-            .ok_or_else(|| format_err!("body not found for block #{block_number}/{block_hash}"))?;
-            let senders = crate::accessors::chain::tx_sender::read(txn, block_hash, block_number)?;
+            } = crate::accessors::chain::block_body::read_without_senders(txn, block_number)?
+                .ok_or_else(|| {
+                    format_err!("body not found for block #{block_number}/{block_hash}")
+                })?;
+            let senders = crate::accessors::chain::tx_sender::read(txn, block_number)?;
 
             let signed_messages = transactions;
 
@@ -569,11 +563,11 @@ where
 
         let db = self.db.clone();
 
-        let (trace_tx, trace_rx) = tokio::sync::mpsc::channel(1);
+        let (res_tx, rx) = tokio::sync::mpsc::channel(1);
 
         tokio::task::spawn_blocking(move || {
             let f = {
-                let trace_tx = trace_tx.clone();
+                let res_tx = res_tx.clone();
                 move || {
                     let txn = db.begin()?;
 
@@ -702,7 +696,7 @@ where
 
                             false
                         }) {
-                            if trace_tx.blocking_send(Ok(trace)).is_err() {
+                            if res_tx.blocking_send(Ok(trace)).is_err() {
                                 return Ok(());
                             };
                         }
@@ -712,11 +706,11 @@ where
                 }
             };
             if let Err::<_, anyhow::Error>(e) = (f)() {
-                let _ = trace_tx.blocking_send(Err(e));
+                let _ = res_tx.blocking_send(Err(e));
             }
         });
 
-        tokio_stream::wrappers::ReceiverStream::new(trace_rx)
+        tokio_stream::wrappers::ReceiverStream::new(rx)
     }
 }
 
@@ -750,7 +744,7 @@ where
 
             let block_id = block_id.unwrap_or(types::BlockId::Number(types::BlockNumber::Latest));
 
-            let (block_number, block_hash) = helpers::resolve_block_id(&txn, block_id)?
+            let (block_number, _) = helpers::resolve_block_id(&txn, block_id)?
                 .ok_or_else(|| format_err!("failed to resolve block {block_id:?}"))?;
             let historical = matches!(block_id, types::BlockId::Number(types::BlockNumber::Latest));
 
@@ -760,7 +754,7 @@ where
                 .params
                 .chain_id;
 
-            let header = crate::accessors::chain::header::read(&txn, block_hash, block_number)?
+            let header = crate::accessors::chain::header::read(&txn, block_number)?
                 .ok_or_else(|| format_err!("header not found"))?;
 
             let msgs = calls
@@ -848,7 +842,6 @@ where
                     .ok_or_else(|| format_err!("canonical hash for block #{block_number} not found"))?;
                 let transactions = crate::accessors::chain::block_body::read_without_senders(
                         &txn,
-                        block_hash,
                         block_number,
                     )?.ok_or_else(|| format_err!("body not found for block #{block_number}/{block_hash}"))?
                     .transactions;
@@ -863,7 +856,7 @@ where
                     })?;
 
                 let message = signed_message.message.clone();
-                let senders = crate::accessors::chain::tx_sender::read(&txn, block_hash, block_number)?;
+                let senders = crate::accessors::chain::tx_sender::read(&txn, block_number)?;
                 let sender = *senders
                     .get(index)
                     .ok_or_else(|| format_err!("senders too short: {index} vs len {}", senders.len()))?;
@@ -965,21 +958,6 @@ where
 mod convert {
     use super::*;
     use ethereum_interfaces::web3::{Eip1559Call, Eip2930Call, LegacyCall, TraceKinds};
-
-    pub fn block_id(block_id: web3::BlockId) -> Option<types::BlockId> {
-        block_id.id.and_then(|block_id| match block_id {
-            web3::block_id::Id::Hash(hash) => Some(types::BlockId::Hash(hash.into())),
-            web3::block_id::Id::Number(block_number) => block_number.block_number.map(|number| {
-                types::BlockId::Number(match number {
-                    web3::block_number::BlockNumber::Latest(_) => types::BlockNumber::Latest,
-                    web3::block_number::BlockNumber::Pending(_) => types::BlockNumber::Pending,
-                    web3::block_number::BlockNumber::Number(number) => {
-                        types::BlockNumber::Number(number.into())
-                    }
-                })
-            }),
-        })
-    }
 
     pub fn access_list(access_list: web3::AccessList) -> Option<Vec<types::AccessListEntry>> {
         access_list
@@ -1386,7 +1364,7 @@ where
     ) -> Result<Response<FullTraces>, tonic::Status> {
         let CallRequests { calls, block_id } = request.into_inner();
         let block_id = block_id
-            .map(convert::block_id)
+            .map(helpers::grpc_block_id)
             .ok_or_else(|| tonic::Status::invalid_argument("invalid block id sent"))?;
 
         <Self as TraceApiServer>::call_many(
@@ -1421,7 +1399,7 @@ where
         &self,
         request: tonic::Request<ethereum_interfaces::web3::BlockId>,
     ) -> Result<Response<OptionalTracesWithLocation>, tonic::Status> {
-        let block_id = convert::block_id(request.into_inner())
+        let block_id = helpers::grpc_block_id(request.into_inner())
             .ok_or_else(|| tonic::Status::invalid_argument("invalid block id sent"))?;
 
         <Self as TraceApiServer>::block(self, block_id)
@@ -1447,7 +1425,7 @@ where
 
         <Self as TraceApiServer>::replay_block_transactions(
             self,
-            id.and_then(convert::block_id)
+            id.and_then(helpers::grpc_block_id)
                 .ok_or_else(|| tonic::Status::invalid_argument("invalid block id sent"))?,
             kinds
                 .map(convert::trace_kinds)
@@ -1507,8 +1485,8 @@ where
         } = request.into_inner();
 
         let filter = ethereum_jsonrpc::Filter {
-            from_block: from_block.and_then(convert::block_id),
-            to_block: to_block.and_then(convert::block_id),
+            from_block: from_block.and_then(helpers::grpc_block_id),
+            to_block: to_block.and_then(helpers::grpc_block_id),
             from_address: from_addresses
                 .map(|addresses| addresses.addresses.into_iter().map(Address::from).collect()),
             to_address: to_addresses
